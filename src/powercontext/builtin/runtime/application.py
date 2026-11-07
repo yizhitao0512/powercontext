@@ -166,7 +166,7 @@ from powercontext.builtin.runtime._scope_cache import (
     ScopeCacheObserver,
     ScopeEvictor,
 )
-from powercontext.builtin.runtime.context_pack import ContextPack, ContextPackDelta
+from powercontext.builtin.runtime.context_pack import INCREMENTAL_CHUNK_BYTES, ContextPack, ContextPackDelta
 from powercontext.builtin.runtime.decision_model import DecisionModel
 from powercontext.builtin.runtime.errors import InvalidRuntimeRequestError, TopicMemoryProcessingUnavailableError
 from powercontext.builtin.runtime.models import (
@@ -859,7 +859,7 @@ class ScopedContextApplication:
         """Return a full pack, or a prefix-reusing delta over ``base_pack``."""
 
         prepared = await self.prepare(request, authorize_scopes=authorize_scopes)
-        target = ContextPack.from_content(prepared.content or "")
+        target = ContextPack.from_content(prepared.content or "", chunk_bytes=INCREMENTAL_CHUNK_BYTES)
         if base_pack is None:
             return target
         return ContextPackDelta.between(base_pack, target)

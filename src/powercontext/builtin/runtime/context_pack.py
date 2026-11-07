@@ -28,6 +28,8 @@ from powercontext.errors import PowerContextError
 PACK_SCHEMA = "powercontext.context-pack.v1"
 DELTA_SCHEMA = "powercontext.context-pack-delta.v1"
 DEFAULT_CHUNK_BYTES = 512
+# 增量路径故意使用更细的分块：条目插入只影响相邻块，提高跨轮前缀复用率。
+INCREMENTAL_CHUNK_BYTES = 96
 _DIGEST_PREFIX = "sha256:"
 _DIGEST_HEX_LENGTH = 64
 _PACK_KEYS = frozenset({"schema", "items", "digest", "byte_count"})
@@ -261,6 +263,7 @@ __all__ = [
     "ContextPackError",
     "DEFAULT_CHUNK_BYTES",
     "DELTA_SCHEMA",
+    "INCREMENTAL_CHUNK_BYTES",
     "PACK_SCHEMA",
     "apply_context_pack_delta",
 ]
