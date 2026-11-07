@@ -100,6 +100,13 @@ class ArtifactProcessingPendingProvider(Protocol):
         ...
 
 
+def _require_source_count_threshold(threshold: int | None) -> None:
+    """Reject non-integer or non-positive Source count thresholds."""
+
+    if threshold is not None and (type(threshold) is not int or threshold < 1):
+        raise ValueError("automatic source count threshold must be a positive integer")  # noqa: TRY003
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactProcessingBinding:
     """Startup registration of one Family and its independently budgeted Worker."""
@@ -112,6 +119,9 @@ class ArtifactProcessingBinding:
     automatic_processing_interval: timedelta | None = None
     cron: str | None = None
     timezone: str = "Asia/Shanghai"
+    # Source-count admission: start automatic processing once at least this many
+    # pending Sources have accumulated behind the last committed cursor.
+    automatic_source_count_threshold: int | None = None
     config_prefix: str | None = None
     pending_provider: ArtifactProcessingPendingProvider | None = None
     # Only automatic admission is filtered; already accepted requests retain
@@ -138,6 +148,7 @@ class ArtifactProcessingBinding:
                 raise ValueError("interval and cron cannot both be enabled")  # noqa: TRY003
         if self.cron is not None:
             CronTrigger.from_crontab(self.cron, timezone=ZoneInfo(self.timezone))
+        _require_source_count_threshold(self.automatic_source_count_threshold)
 
 
 class _WorkerResultSender(Protocol):
@@ -393,6 +404,7 @@ class _FamilyState:
     retries: dict[str, _RetryState] = field(default_factory=dict)
     requested_after: int = 0
     scan_after: int = 0
+    count_after: str | None = None
     scan_generation: int = 0
     scan_in_progress: bool = False
     reconcile_after: str | None = None
@@ -709,6 +721,8 @@ class ArtifactProcessingSupervisor:
         scan_after = state.scan_after
         scan_generation = state.scan_generation
         scan_in_progress = False
+        count_after = state.count_after
+        count_in_progress = False
         next_schedule_at = state.next_schedule_at
         next_discovery_at = state.next_discovery_at
         admitted: list[str] = []
@@ -774,13 +788,47 @@ class ArtifactProcessingSupervisor:
                         next_schedule_at = asyncio.get_running_loop().time() + max(0, (next_time - now).total_seconds())
                     else:
                         next_discovery_at = asyncio.get_running_loop().time() + _DISCOVERY_PAGE_DELAY_SECONDS
+            # Source-count admission is independent of the schedule: it only decides
+            # whether automatic processing may start, never how much a window reads.
+            threshold = binding.automatic_source_count_threshold
+            if threshold is not None and binding.pending_provider is not None:
+                count_limit = min(capacity - len(admitted), _DISCOVERY_PAGE_SIZE)
+                if count_limit > 0:
+                    qualified, page_after = await binding.pending_provider.pending_scopes(
+                        connection, count_after, count_limit, threshold
+                    )
+                    count_after = page_after
+                    count_in_progress = page_after is not None
+                    eligible = frozenset(
+                        scope
+                        for scope in qualified
+                        if scope not in state.queued and scope not in state.running and scope not in state.retries
+                    )
+                    if eligible and binding.automatic_scope_filter is not None:
+                        eligible &= await binding.automatic_scope_filter(connection, tuple(eligible))
+                    for scope in qualified:
+                        if scope not in eligible:
+                            continue
+                        await self._mark_automatic_pending(connection, scope, binding.binding_name)
+                        await self._intents.request(connection, scope, binding.binding_name)
+                        admitted.append(scope)
+                    if count_in_progress:
+                        next_discovery_at = asyncio.get_running_loop().time() + _DISCOVERY_PAGE_DELAY_SECONDS
         state.scan_after = scan_after
         state.scan_generation = scan_generation
         state.scan_in_progress = scan_in_progress
+        state.count_after = count_after if count_in_progress else None
         state.next_schedule_at = next_schedule_at
         state.next_discovery_at = next_discovery_at
         for scope in admitted:
             self._enqueue(state, scope)
+
+    async def _mark_automatic_pending(self, connection: AsyncConnection, scope_id: str, binding_name: str) -> None:
+        """Mark pending work dirty once, never on every discovery pass."""
+
+        intent = await self._intents.load(connection, scope_id, binding_name, for_update=True)
+        if intent is None or intent.dirty_generation == intent.clean_generation:
+            await self._intents.mark_dirty(connection, scope_id, binding_name)
 
     @staticmethod
     def _fresh_capacity(state: _FamilyState) -> int:
@@ -1095,6 +1143,11 @@ class ArtifactProcessingSupervisor:
                 deadlines.append(state.next_schedule_at)
             if state.discovery_pending or state.scan_in_progress or not state.reconcile_complete or state.degraded:
                 deadlines.append(max(now, state.next_discovery_at))
+            if state.binding.automatic_source_count_threshold is not None:
+                # Sources can also arrive from another process through paths that
+                # cannot wake this supervisor, so the count channel must re-check
+                # on a bounded cadence instead of only on a local notification.
+                deadlines.append(now + self._tick)
         return None if not deadlines else max(0.001, min(deadlines) - now)
 
     def _log_failure(

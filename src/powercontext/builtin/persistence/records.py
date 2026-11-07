@@ -43,6 +43,7 @@ from powercontext.builtin.persistence.family_management import (
 )
 from powercontext.builtin.persistence.memory import RelationalMemoryBackend
 from powercontext.builtin.persistence.processing import ArtifactProcessingPendingRepository
+from powercontext.builtin.persistence.processing_intents import ArtifactProcessingIntentRepository
 from powercontext.builtin.persistence.sources import SourceRepository, StoredSource
 from powercontext.builtin.persistence.tables import (
     ARTIFACT_HEADS_TABLE,
@@ -118,6 +119,7 @@ class RelationalRecordService:
         cursor_ttl_seconds: int = _DEFAULT_CURSOR_TTL_SECONDS,
         processing_pending: ArtifactProcessingPendingRepository | None = None,
         source_processing_bindings: tuple[str, ...] = (),
+        source_dirty_bindings: tuple[str, ...] = (),
         topic_memory_list_reader: ArtifactListReader | None = None,
     ) -> None:
         self._database = database
@@ -134,6 +136,11 @@ class RelationalRecordService:
         self._cursor_secret = self._cursor_codec.secret
         self._processing_pending = processing_pending
         self._source_processing_bindings = source_processing_bindings
+        self._source_dirty_bindings = source_dirty_bindings
+        self._processing_intents = ArtifactProcessingIntentRepository()
+        # Set by the Runtime so a new Source can wake native automatic processing
+        # instead of waiting for the next scheduled tick.
+        self.processing_wake: Callable[[], None] | None = None
         self._topic_memory_list_reader = topic_memory_list_reader
         self._tags = RelationalTagService(
             database,
@@ -215,8 +222,15 @@ class RelationalRecordService:
                             binding_name,
                             stored.journal_position,
                         )
+                if created:
+                    # A stored identity is the only thing that can raise the pending
+                    # count, so duplicates and receipt upgrades never mark work.
+                    for binding_name in self._source_dirty_bindings:
+                        await self._processing_intents.mark_dirty(connection, scope_id, binding_name)
         except StoredPayloadConflictError as error:
             raise BaseValueConflictError("source", (scope_id, source_type, source.name)) from error
+        if created and self.processing_wake is not None:
+            self.processing_wake()
         return _source_record(scope_id, stored)
 
     async def get_source(self, scope_id: str, source_type: str, source_id: str, /) -> SourceRecord:

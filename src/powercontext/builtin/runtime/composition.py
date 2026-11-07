@@ -353,6 +353,20 @@ def _configured_memory_write_gate(
     return gate
 
 
+def _wire_source_count_wake(
+    runtime: BuiltinRuntime,
+    contexts: RelationalContexts,
+    bindings: Sequence[ArtifactProcessingBinding],
+) -> None:
+    """Let a freshly stored Source wake count admission instead of a schedule tick."""
+
+    if not any(binding.automatic_source_count_threshold is not None for binding in bindings):
+        return
+    supervisor = runtime.artifact_processing_supervisor
+    if supervisor is not None:
+        contexts.records.processing_wake = supervisor.wake
+
+
 @asynccontextmanager
 async def open_builtin_runtime(
     config: BuiltinConfig,
@@ -656,6 +670,7 @@ async def open_builtin_runtime(
         runtime.artifact_processing_supervisor = await resources.enter_async_context(
             _open_artifact_processing_supervisor(config, contexts, processing_bindings, tracing=tracing)
         )
+        _wire_source_count_wake(runtime, contexts, processing_bindings)
         contexts.profiles.operation_context = runtime._operation
         if config.handoff_report.enabled:
             runtime.handoff_report = HandoffReportApplication(
@@ -718,6 +733,12 @@ def _artifact_processing_bindings(  # noqa: C901 - validate and assemble one reg
         "experience": config.runtime.experience_schedule_seconds,
         "profile": config.runtime.profile_schedule_enabled or None,
         "skill": None,
+    }
+    # Source-count thresholds only gate Families that are already declared, so an
+    # undeclared Family never starts processing because of a configured threshold.
+    source_counts = {
+        "memory": config.runtime.memory_source_count_threshold,
+        "topic-memory": config.runtime.topic_memory_source_count_threshold,
     }
     for family, schedule in automatic.items():
         if schedule is not None and family not in declared | registered:
@@ -786,6 +807,7 @@ def _artifact_processing_bindings(  # noqa: C901 - validate and assemble one reg
                 pending_provider=None
                 if family == "skill"
                 else SourceProcessingPendingProvider(contexts.database, binding, family),
+                automatic_source_count_threshold=source_counts.get(family),
                 automatic_scope_filter=enabled_profile_scopes if family == "profile" else None,
             )
         )

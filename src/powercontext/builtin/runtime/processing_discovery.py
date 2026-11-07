@@ -53,6 +53,39 @@ class SourceProcessingPendingProvider:
         self._binding = binding_name
         self._family = artifact_family
 
+    async def pending_scopes(
+        self,
+        connection: AsyncConnection,
+        after_scope_id: str | None,
+        limit: int,
+        threshold: int,
+        /,
+    ) -> tuple[tuple[str, ...], str | None]:
+        """Bounded keyset page of scopes whose pending Source count reaches ``threshold``.
+
+        Pending is measured from the last committed cursor of this binding, so
+        duplicate captures, receipt upgrades, and already processed windows never
+        inflate the count. The caller owns the transaction and its lease fence.
+        """
+
+        heads = SOURCE_JOURNAL_HEADS_TABLE
+        statement = select(heads.c.scope_id, heads.c.position).order_by(heads.c.scope_id).limit(limit)
+        if after_scope_id is not None:
+            statement = statement.where(heads.c.scope_id > after_scope_id)
+        if self._family == "profile":
+            statement = statement.join(
+                PROFILE_POLICIES_TABLE, PROFILE_POLICIES_TABLE.c.scope_id == heads.c.scope_id
+            ).where(PROFILE_POLICIES_TABLE.c.generation_enabled.is_(True))
+        rows = (await connection.execute(statement)).all()
+        cursors = SourceCursorRepository()
+        qualified: list[str] = []
+        for scope, high in rows:
+            cursor = await cursors.load(connection, str(scope), self._binding)
+            pending = int(high) - (0 if cursor is None else cursor.cursor.sequence)
+            if pending >= threshold:
+                qualified.append(str(scope))
+        return tuple(qualified), (str(rows[-1][0]) if len(rows) == limit else None)
+
     async def reconcile(self, after_scope_id: str | None, limit: int, *, fence: ArtifactProcessingFence) -> str | None:
         heads = SOURCE_JOURNAL_HEADS_TABLE
         statement = select(heads.c.scope_id, heads.c.position).order_by(heads.c.scope_id).limit(limit)

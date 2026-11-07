@@ -664,6 +664,7 @@ class RelationalContexts:
             cursor_secret=cursor_secret,
             processing_pending=self.repositories.processing_pending,
             source_processing_bindings=(TOPIC_MEMORY_SOURCE_WINDOW_BINDING,),
+            source_dirty_bindings=(SOURCE_WINDOW_TRIGGER_NAME, TOPIC_MEMORY_SOURCE_WINDOW_BINDING),
             topic_memory_list_reader=TopicMemoryArtifactListReader(
                 database=database,
                 artifacts=artifact_repository,
