@@ -49,8 +49,9 @@ case "${1:?}" in
     run)
         : "${PC_EVIDENCE_DIR:?}" "${PC_MARKER:?}" "${PC_RESOURCES_OWNED:?}"
         test "$PC_RESOURCES_OWNED" = yes
-        git diff --exit-code HEAD^ HEAD -- e2e/bub/Dockerfile docker/Dockerfile src
-        echo "Validated candidate parent: $(git rev-parse HEAD^)"
+        candidate=aee629a0f08592c04ea42fbebd5bda4149f0857e
+        git diff --exit-code "$candidate" HEAD -- e2e/bub/Dockerfile docker/Dockerfile src
+        echo "Validated candidate: $candidate"
         export PC_SQLITE_PROJECT="$project"
         python3 - <<'PY'
 import os
@@ -58,7 +59,9 @@ from pathlib import Path
 p = Path("e2e/bub/run.sh")
 s = p.read_text()
 line = next(line for line in s.splitlines() if line.startswith("export COMPOSE_PROJECT_NAME="))
-p.write_text(s.replace(line, 'export COMPOSE_PROJECT_NAME="$PC_SQLITE_PROJECT"'))
+s = s.replace(line, 'export COMPOSE_PROJECT_NAME="$PC_SQLITE_PROJECT"')
+auth_line = next(line for line in s.splitlines() if line.startswith("auth_path="))
+p.write_text(s.replace(auth_line, 'auth_path="$PC_SQLITE_AUTH_DIR/auth.json"'))
 for name, cache in (("e2e/bub/Dockerfile", "powercontext-bub-e2e-uv"), ("docker/Dockerfile", "powercontext-uv")):
     p = Path(name)
     s = p.read_text()
@@ -67,9 +70,9 @@ for name, cache in (("e2e/bub/Dockerfile", "powercontext-bub-e2e-uv"), ("docker/
 PY
         export TMPDIR="$PC_EVIDENCE_DIR/tmp" XDG_CACHE_HOME="$PC_EVIDENCE_DIR/cache"
         export UV_CACHE_DIR="$PC_EVIDENCE_DIR/cache/uv" UV_PYTHON_INSTALL_DIR="$PC_EVIDENCE_DIR/python"
-        export CODEX_HOME="$PC_EVIDENCE_DIR/codex" POWERCONTEXT_E2E_DATABASE=sqlite
+        export PC_SQLITE_AUTH_DIR="$PC_EVIDENCE_DIR/codex" POWERCONTEXT_E2E_DATABASE=sqlite
         export POWERCONTEXT_E2E_OUTPUT="$PC_EVIDENCE_DIR/evidence"
-        mkdir -p "$TMPDIR" "$UV_CACHE_DIR" "$UV_PYTHON_INSTALL_DIR" "$CODEX_HOME"
+        mkdir -p "$TMPDIR" "$UV_CACHE_DIR" "$UV_PYTHON_INSTALL_DIR" "$PC_SQLITE_AUTH_DIR"
         make harness-compose-acceptance
         ;;
     scan)
