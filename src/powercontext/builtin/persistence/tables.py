@@ -51,6 +51,7 @@ from powercontext.limits import (
     MAX_SCOPE_SUMMARY_LENGTH,
     MAX_SCOPE_TITLE_LENGTH,
     MAX_SOURCE_ID_LENGTH,
+    MAX_SOURCE_LIFECYCLE_NODE_ID_LENGTH,
     MAX_SOURCE_TYPE_LENGTH,
 )
 
@@ -1180,6 +1181,57 @@ RECURRENCE_OBSERVATION_TABLE = Table(
 
 RECURRENCE_TABLES = (RECURRENCE_MATCH_TABLE, RECURRENCE_OBSERVATION_TABLE)
 
+# Source lifecycle: the dependency graph a caller registers for one Scope. A node
+# is a Source, a Memory entry, or a Topic Memory artifact; derived nodes carry the
+# parents they depend on and the policy that decides whether partial support is
+# enough. ``available`` is the propagated verdict, ``deactivated`` records that the
+# lifecycle itself moved the entry and is therefore allowed to move it back.
+SOURCE_LIFECYCLE_NODES_TABLE = Table(
+    "pc_source_lifecycle_nodes",
+    SHARED_METADATA,
+    Column("scope_id", identity_string(MAX_SCOPE_ID_LENGTH), primary_key=True),
+    Column("node_id", identity_string(MAX_SOURCE_LIFECYCLE_NODE_ID_LENGTH), primary_key=True),
+    Column("ordinal", BigInteger, nullable=False),
+    Column("family", String(16), nullable=False),
+    Column("policy", String(8), nullable=False),
+    Column("parents_json", _entry_text_type(), nullable=False),
+    Column("reference_json", _entry_text_type(), nullable=False),
+    Column("available", Boolean, nullable=False),
+    Column("deactivated", Boolean, nullable=False),
+    Column("source_revision", BigInteger),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    ForeignKeyConstraint(("scope_id",), ("pc_scopes.scope_id",), ondelete="CASCADE"),
+    UniqueConstraint("scope_id", "ordinal", name="uq_pc_source_lifecycle_nodes_ordinal"),
+    CheckConstraint(
+        "family IN ('source', 'memory', 'topic')",
+        name="ck_pc_source_lifecycle_nodes_family",
+    ),
+    CheckConstraint(
+        "policy IN ('all', 'any')",
+        name="ck_pc_source_lifecycle_nodes_policy",
+    ),
+)
+
+# Append-only lifecycle events per Source. Replaying a stored sequence is
+# idempotent; a lower sequence or the same sequence with a different body is a
+# conflict, so the stored body is compared against the incoming event.
+SOURCE_LIFECYCLE_EVENTS_TABLE = Table(
+    "pc_source_lifecycle_events",
+    SHARED_METADATA,
+    Column("scope_id", identity_string(MAX_SCOPE_ID_LENGTH), primary_key=True),
+    Column("node_id", identity_string(MAX_SOURCE_LIFECYCLE_NODE_ID_LENGTH), primary_key=True),
+    Column("sequence", BigInteger, primary_key=True),
+    Column("revision", BigInteger, nullable=False),
+    Column("available", Boolean, nullable=False),
+    Column("reason", _entry_text_type(), nullable=False),
+    Column("applied_at", DateTime(timezone=True), nullable=False),
+    ForeignKeyConstraint(("scope_id",), ("pc_scopes.scope_id",), ondelete="CASCADE"),
+    CheckConstraint("sequence > 0", name="ck_pc_source_lifecycle_events_sequence_positive"),
+    CheckConstraint("revision > 0", name="ck_pc_source_lifecycle_events_revision_positive"),
+)
+
+SOURCE_LIFECYCLE_TABLES = (SOURCE_LIFECYCLE_NODES_TABLE, SOURCE_LIFECYCLE_EVENTS_TABLE)
+
 BUILTIN_TABLES = (
     SCOPE_TABLES
     + SHARED_TABLES
@@ -1187,5 +1239,6 @@ BUILTIN_TABLES = (
     + MEMORY_TABLES
     + STATISTICS_TABLES
     + RECURRENCE_TABLES
+    + SOURCE_LIFECYCLE_TABLES
     + (ARTIFACT_TAGS_TABLE, DREAM_RUNS_TABLE, RECEIPT_MIGRATION_REVIEW_TABLE)
 )
