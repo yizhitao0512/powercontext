@@ -69,6 +69,12 @@ _SEARCH_HEADING_LINE = re.compile(
 _SEARCH_MAX_HEADINGS = 20
 _SEARCH_HEADING_CHARS = 900
 _SEARCH_HEADING_BOOST = 2.5
+# The primary statements carry the numbers a financial question asks for, but they are headed
+# "Consolidated Statement of Income", never "operating margin", so they are ranked on their
+# heading alone.
+_SEARCH_STATEMENT_START = re.compile(r"^consolidated\s+(?:statements?\s+of|balance\s+sheet)", re.IGNORECASE)
+_SEARCH_STATEMENT_BOOST = 2.2
+_SEARCH_STATEMENT_PAGES = 2
 _SEARCH_TERM_QUERIES = 8
 _SEARCH_CANDIDATE_LIMIT = 300
 # Pages that run on from a strong page are strong candidates of their own.
@@ -227,6 +233,32 @@ def _term_hits(term: str, page: frozenset[str], prefixes: frozenset[str]) -> int
     return (1 if term in page else 0) + (1 if prefix in prefixes else 0)
 
 
+def _page_first_line(text: str) -> str:
+    """Return the first line of the page body, skipping the running header."""
+
+    body = text.partition("\n")[2] or text
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.lower().startswith(_SEARCH_RUNNING_HEADER):
+            return stripped
+    return ""
+
+
+def _is_primary_statement(text: str) -> bool:
+    """Report whether a page opens with the heading of a primary financial statement.
+
+    The question and the statement rarely share a word: "operating margin" is answered by the
+    income statement, which says "Operating Profit" and never says "margin", and a question about
+    a ratio names no line item at all. Every filing, however, states its numbers on the same
+    handful of pages — income, comprehensive income, balance sheet, cash flows, equity — and each
+    of them opens with its own heading. Only the opening line counts: the notes cite "the
+    consolidated financial statements" on every page, so a page that merely mentions them is not
+    a statement page.
+    """
+
+    return bool(_SEARCH_STATEMENT_START.match(_page_first_line(text)))
+
+
 def _rank_pages(
     candidates: Sequence[tuple[object, str]],
     terms: tuple[str, ...],
@@ -240,7 +272,7 @@ def _rank_pages(
     what an analyst searches for, and it is the only part of the page that is about one topic.
     """
 
-    prepared: list[tuple[object, frozenset[str], frozenset[str], frozenset[str], frozenset[str]]] = []
+    prepared: list[tuple[object, frozenset[str], frozenset[str], frozenset[str], frozenset[str], bool]] = []
     for hit, text in candidates:
         page = _page_terms(text)
         head = _page_terms(_page_heading(text))
@@ -250,13 +282,14 @@ def _rank_pages(
             frozenset(word[:_SEARCH_PREFIX_LENGTH] for word in page),
             head,
             frozenset(word[:_SEARCH_PREFIX_LENGTH] for word in head),
+            _is_primary_statement(text),
         ))
     total = len(prepared) or 1
     frequency = {
-        term: sum(1 for _, page, prefixes, _, _ in prepared if _term_hits(term, page, prefixes)) for term in terms
+        term: sum(1 for _, page, prefixes, _, _, _ in prepared if _term_hits(term, page, prefixes)) for term in terms
     }
-    scored: list[tuple[float, int, object]] = []
-    for index, (hit, page, prefixes, head, head_prefixes) in enumerate(prepared):
+    values: dict[int, float] = {}
+    for index, (_, page, prefixes, head, head_prefixes, _) in enumerate(prepared):
         value = 0.0
         matched = 0
         for term in terms:
@@ -269,9 +302,17 @@ def _rank_pages(
             if _term_hits(term, head, head_prefixes):
                 weight *= _SEARCH_HEADING_BOOST
             value += idf * idf * weight
-        if not matched:
-            continue
-        scored.append((value, index, hit))
+        if matched:
+            values[index] = value
+    # A filing's statements are worth at most a couple of citations, and the ones that carry the
+    # question's own wording are already ranked. Lifting every statement page would push the
+    # question's actual match out of the window, so only the strongest two are lifted.
+    statements = [index for index, prepared_page in enumerate(prepared) if prepared_page[5] and index in values]
+    lifted = set(sorted(statements, key=lambda index: -values[index])[:_SEARCH_STATEMENT_PAGES])
+    scored = [
+        (value * (_SEARCH_STATEMENT_BOOST if index in lifted else 1.0), index, prepared[index][0])
+        for index, value in values.items()
+    ]
     scored.sort(key=lambda item: (-item[0], item[1]))
     return scored
 
