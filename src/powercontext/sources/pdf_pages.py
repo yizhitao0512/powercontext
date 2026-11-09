@@ -54,6 +54,26 @@ _SEARCH_MIN_TERM_LENGTH = 3
 # "geographies" never matches "geographic" through a tokenizer without stemming, so a term is
 # also credited through the prefix both spellings share.
 _SEARCH_PREFIX_LENGTH = 6
+# A question that asks for "geographies" is answered by the page that lists the company's
+# operating divisions and the regions each division covers, and that page names the regions but
+# never the word "geography". Expanding the geography concept to the division vocabulary and the
+# region names lets that page surface, while leaving every non-geography question untouched.
+_SEARCH_GEOGRAPHY_EXPANSION = (
+    "division",
+    "divisions",
+    "segment",
+    "segments",
+    "america",
+    "europe",
+    "africa",
+    "asia",
+    "australia",
+    "zealand",
+    "china",
+    "amesa",
+    "apac",
+    "latam",
+)
 # The page opening carries the section heading, so a term found there identifies the topic.
 _SEARCH_RUNNING_HEADER = "table of contents"
 _SEARCH_HEADING_LINES = 6
@@ -200,6 +220,18 @@ def _search_terms(question: str) -> tuple[str, ...]:
             continue
         terms.append(word)
     return tuple(terms)
+
+
+def _geography_expansion(terms: Sequence[str]) -> tuple[str, ...]:
+    """Return region/division terms when a question asks about geographies.
+
+    Only questions whose content words already include a ``geograph*`` term trigger this, so a
+    question about margins or legal proceedings is never polluted with region vocabulary.
+    """
+
+    if not any(term.startswith("geograph") for term in terms):
+        return ()
+    return tuple(word for word in _SEARCH_GEOGRAPHY_EXPANSION if word not in terms)
 
 
 def _page_terms(text: str) -> frozenset[str]:
@@ -398,16 +430,20 @@ async def search_pdf_pages(memory, question: str, limit: int = DEFAULT_SEARCH_LI
     if limit <= 0:
         return ()
     terms = _search_terms(question)
+    expansion = _geography_expansion(terms)
     pool: dict[str, object] = {}
-    for query in (question, *terms[:_SEARCH_TERM_QUERIES]):
+    for query in (question, *terms[:_SEARCH_TERM_QUERIES], *expansion):
         page = await memory.search(SearchMemoryRequest(query=query, mode="fts", limit=_SEARCH_CANDIDATE_LIMIT))
         for hit in page.hits:
             pool.setdefault(hit.entry_id, hit)
     if not pool:
         return ()
     candidates = [(hit, hit.text) for hit in pool.values()]
+    rank_terms = (*terms, *expansion) if terms else ()
     scored = (
-        _rank_pages(candidates, terms) if terms else [(0.0, index, hit) for index, (hit, _) in enumerate(candidates)]
+        _rank_pages(candidates, rank_terms)
+        if rank_terms
+        else [(0.0, index, hit) for index, (hit, _) in enumerate(candidates)]
     )
     ranked = await _promote_neighbours(memory, scored, limit)
     return tuple(
